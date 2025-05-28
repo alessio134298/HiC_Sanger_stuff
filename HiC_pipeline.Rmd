@@ -1,0 +1,775 @@
+##########################
+Chicken Graft HiC pipeline
+##########################
+
+```{r setup}
+require("knitr")
+opts_knit$set(root.dir = "/lustre/scratch126/gengen/teams/parts/ab77/")
+library(tidyverse)
+```
+
+---
+Quality control
+---
+
+```{bash, eval = F}
+#!/bin/bash
+SAMPLE_SHEET="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/galGal6_human_samples.csv"
+OUTPUT_FQC="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Fastqc_galGal6"
+OUTPUT_MQC="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/MultiQC_galGal6"
+M=64000
+q="normal"
+n=12
+
+source /software/hgi/installs/conda-audited/miniforge/etc/profile.d/conda.sh
+conda activate fastqc
+
+mkdir -p ${OUTPUT_FQC}
+mkdir -p ${OUTPUT_MQC}
+
+while IFS=',' read -r sample fastq_1 fastq_2 genome;
+    do
+
+    fastqc="
+    fastqc -t 12 ${fastq_1} -o ${OUTPUT_FQC}
+    fastqc -t 12 ${fastq_2} -o ${OUTPUT_FQC}
+    "
+
+    bsub -n $n -J "Fastqc_${sample}" \
+          -o ${OUTPUT_FQC}/${sample}_fastqc.log.out \
+          -e ${OUTPUT_FQC}/${sample}_fastqc.log.err \
+          -M $M -R "select[mem>$M] rusage[mem=$M]" \
+          -q $q \
+          bash -c "${fastqc}"
+
+done < ${SAMPLE_SHEET}
+
+
+
+# Actually i run this Multiqc separatedly (It was commented)
+bsub -n 6 -J "MultiQC" \
+    -o ${OUTPUT_MQC}/MultiQC.log.out \
+    -e ${OUTPUT_MQC}/MultiQC.log.err \
+    -M $M -R "select[mem>$M] rusage[mem=$M]" \
+    -q $q \
+    bash -c "multiqc ${OUTPUT_FQC} --outdir ${OUTPUT_MQC}"
+```
+
+---
+Alignment and generation of the matrices with HiCExplorer
+---
+
+```{bash, eval = F}
+#!/bin/bash
+SAMPLE_SHEET="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/galGal6_human_samples.csv"
+
+FASTA_HG38_GALGAL6="/lustre/scratch126/gengen/projects/graft/Dataset/reference/hg38_galGal6_full_plusPuro/fasta/GRCh38.GRCg6a.full.renamed.merged.plusPuro.fa"
+FASTA_HG38_MM39="/lustre/scratch126/gengen/projects/graft/Dataset/reference/hg38_mm39/fasta/hg38_mm39_renamed.fa"
+INDEX_HG38_GALGAL6="/lustre/scratch126/gengen/teams/parts/ab77/bwa_index/GRCh38.GRCg6a.full.renamed.merged.plusPuro.fa."
+INDEX_HG38_MM39="/lustre/scratch126/gengen/projects/graft/Dataset/reference/hg38_mm39/bwa_index/hg38_mm39_renamed.fa"
+OUTPUT_FOLDER="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Processed_samples/mouse"
+REST_SITES_DIR="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/RestSites"
+
+# Activate environment
+module load HGI/softpack/groups/escramble/eSCRAMBLE/8
+
+# create directory for output folder for intermediate files
+mkdir -p ${OUTPUT_FOLDER}
+
+# Rest sites
+mkdir -p ${REST_SITES_DIR}
+
+
+findrestsite="
+# hg38_galGal6
+
+# DpnII (4 bp) - GATC
+hicFindRestSite \
+	--fasta ${FASTA_HG38_GALGAL6} \
+	--searchPattern GATC \
+	-o  ${REST_SITES_DIR}/DpnII_site_positions_hg38_galGal6.bed
+# HinfI (5 bp) - GANTC
+hicFindRestSite \
+	--fasta ${FASTA_HG38_GALGAL6} \
+	--searchPattern GA.TC \
+	-o  ${REST_SITES_DIR}/HinfI_site_positions_hg38_galGal6.bed
+# Combine rest sites
+cat  ${REST_SITES_DIR}/DpnII_site_positions_hg38_galGal6.bed  ${REST_SITES_DIR}/HinfI_site_positions_hg38_galGal6.bed > ${REST_SITES_DIR}/Arima_site_positions_hg38_galGal6.bed
+sort -k1,1 -k2,2n  ${REST_SITES_DIR}/Arima_site_positions_hg38_galGal6.bed > ${REST_SITES_DIR}/Arima_site_positions_hg38_galGal6.sorted.bed
+
+# hg38_mm39
+
+# DpnII (4 bp) - GATC
+hicFindRestSite \
+	--fasta ${FASTA_HG38_MM39} \
+	--searchPattern GATC \
+	-o  ${REST_SITES_DIR}/DpnII_site_positions_hg38_mm39.bed
+# HinfI (5 bp) - GANTC
+hicFindRestSite \
+	--fasta ${FASTA_HG38_MM39} \
+	--searchPattern GA.TC \
+	-o  ${REST_SITES_DIR}/HinfI_site_positions_hg38_mm39.bed
+# Combine rest sites
+cat  ${REST_SITES_DIR}/DpnII_site_positions_hg38_mm39.bed  ${REST_SITES_DIR}/HinfI_site_positions_hg38_mm39.bed > ${REST_SITES_DIR}/Arima_site_positions_hg38_mm39.bed
+sort -k1,1 -k2,2n  ${REST_SITES_DIR}/Arima_site_positions_hg38_mm39.bed > ${REST_SITES_DIR}/Arima_site_positions_hg38_mm39.sorted.bed
+"
+
+bsub -n 1 -J "findrestsite" \
+    -o ${REST_SITES_DIR}/findrestsite.log.out \
+    -e ${REST_SITES_DIR}/findrestsite.log.err \
+    -M 128000 -R "select[mem>128000] rusage[mem=128000]" \
+    -q "normal" \
+    bash -c "${findrestsite}"
+
+
+#################################################
+# Alignment, sorting, BigWig generation, idxstats
+#################################################
+
+M=128000 
+# 64000 worked too, but some samples failed for unknown reason (probably a reboot of the farm),
+# so for rerunning them i set 128 Gb to be sure that was not a memory usage limit problem 
+q="long"
+n=20
+
+while IFS=',' read -r sample fastq_1 fastq_2 genome;
+    do
+    
+    mkdir -p ${OUTPUT_FOLDER}/${sample}
+    mkdir -p ${OUTPUT_FOLDER}/${sample}/logs
+
+    samplename_1=$(basename "$fastq_1" | awk -F ".fastq.gz" '{print $1}')
+    samplename_2=$(basename "$fastq_2" | awk -F ".fastq.gz" '{print $1}')
+
+    echo "Processing: ${sample}, Mate 1 is: ${fastq_1}, Mate 2 is: ${fastq_2}, genome is: ${genome}"
+
+    if [ "${genome}" == "hg38_galGal6" ]; then
+        INDEX=${INDEX_HG38_GALGAL6}
+    elif [ "${genome}" == "hg38_mm39" ]; then
+        INDEX=${INDEX_HG38_MM39}
+    else
+        echo "error: $genome not recognized"
+        exit 1
+    fi
+
+    HiC_Alignment_sorting="
+
+    # MATE 1 alignment, sorting, bamcoverage
+
+    bwa mem -t20 -A1 -B4 -E50 -L0  ${INDEX} ${fastq_1} 2>>${OUTPUT_FOLDER}/${sample}/logs/bwa_R1.log | \
+    samtools view -hb - > ${OUTPUT_FOLDER}/${sample}/${samplename_1}.bam
+
+    samtools sort ${OUTPUT_FOLDER}/${sample}/${samplename_1}.bam -o \
+    ${OUTPUT_FOLDER}/${sample}/${samplename_1}.sorted.bam -@ 20 2>>${OUTPUT_FOLDER}/${sample}/logs/sort_R1.log
+
+    samtools index -@ 2 ${OUTPUT_FOLDER}/${sample}/${samplename_1}.sorted.bam 2>>${OUTPUT_FOLDER}/${sample}/logs/index_R1.log
+
+    samtools idxstats -@ 2 ${OUTPUT_FOLDER}/${sample}/${samplename_1}.sorted.bam \
+    > ${OUTPUT_FOLDER}/${sample}/${samplename_1}.stats 
+
+    bamCoverage -b ${OUTPUT_FOLDER}/${sample}/${samplename_1}.sorted.bam -o \
+    ${OUTPUT_FOLDER}/${sample}/${samplename_1}.bw -p 20 \
+    --normalizeUsing CPM 2>>${OUTPUT_FOLDER}/${sample}/logs/bamcoverage_R1.log
+
+    samtools sort -n ${OUTPUT_FOLDER}/${sample}/${samplename_1}.bam -o \
+    ${OUTPUT_FOLDER}/${sample}/${samplename_1}.sortedbyname.bam -@ 20 2>>${OUTPUT_FOLDER}/${sample}/logs/sortbyname_R1.log
+
+    rm ${OUTPUT_FOLDER}/${sample}/${samplename_1}.bam \
+    ${OUTPUT_FOLDER}/${sample}/${samplename_1}.sorted.bam \
+    ${OUTPUT_FOLDER}/${sample}/${samplename_1}.sorted.bam.bai
+
+    # MATE 2 alignment, sorting, bamcoverage
+    
+    bwa mem -t20 -A1 -B4 -E50 -L0  ${INDEX} ${fastq_2} 2>>${OUTPUT_FOLDER}/${sample}/logs/bwa_R2.log | \
+    samtools view -hb - > ${OUTPUT_FOLDER}/${sample}/${samplename_2}.bam
+
+    samtools sort ${OUTPUT_FOLDER}/${sample}/${samplename_2}.bam -o \
+    ${OUTPUT_FOLDER}/${sample}/${samplename_2}.sorted.bam -@ 20 2>>${OUTPUT_FOLDER}/${sample}/logs/sort_R2.log
+
+    samtools index -@ 2 ${OUTPUT_FOLDER}/${sample}/${samplename_2}.sorted.bam 2>>${OUTPUT_FOLDER}/${sample}/logs/index_R2.log
+
+    samtools idxstats -@ 2 ${OUTPUT_FOLDER}/${sample}/${samplename_2}.sorted.bam \
+    > ${OUTPUT_FOLDER}/${sample}/${samplename_2}.stats
+
+    bamCoverage -b ${OUTPUT_FOLDER}/${sample}/${samplename_2}.sorted.bam -o \
+    ${OUTPUT_FOLDER}/${sample}/${samplename_2}.bw -p 20 \
+    --normalizeUsing CPM 2>>${OUTPUT_FOLDER}/${sample}/logs/bamcoverage_R2.log
+
+    samtools sort -n ${OUTPUT_FOLDER}/${sample}/${samplename_2}.bam -o \
+    ${OUTPUT_FOLDER}/${sample}/${samplename_2}.sortedbyname.bam -@ 20 2>>${OUTPUT_FOLDER}/${sample}/logs/sortbyname_R2.log
+
+    rm ${OUTPUT_FOLDER}/${sample}/${samplename_2}.bam  \
+    ${OUTPUT_FOLDER}/${sample}/${samplename_2}.sorted.bam \
+    ${OUTPUT_FOLDER}/${sample}/${samplename_2}.sorted.bam.bai
+    "
+    
+    if bjobs -w | grep -q "findrestsite"; then
+        wait_condition="-w done(findrestsite)"
+    else
+        wait_condition=""
+    fi
+
+    # Submit the job
+    bsub -n $n -J "HiC_Alignment_sorting_${sample}" \
+        $wait_condition \
+        -o ${OUTPUT_FOLDER}/${sample}/${sample}_Align.log.out \
+        -e ${OUTPUT_FOLDER}/${sample}/${sample}_Align.log.err \
+        -M $M -R "select[mem>$M] rusage[mem=$M]" \
+        -q $q \
+        bash -c "${HiC_Alignment_sorting}"
+
+done < "$SAMPLE_SHEET"
+
+##############################
+# buildmatrix, diagnostic plot
+##############################
+
+M=256000
+# Here this amount of memory is mandatory, with less it reaches memory usage limit 
+q="long"
+n=8
+
+while IFS=',' read -r sample fastq_1 fastq_2 genome;
+    do
+    
+    samplename_1=$(basename "$fastq_1" | awk -F ".fastq.gz" '{print $1}')
+    samplename_2=$(basename "$fastq_2" | awk -F ".fastq.gz" '{print $1}')
+
+    # HiCExplorer
+
+    HiC_Matrix="
+    hicBuildMatrix --samFiles ${OUTPUT_FOLDER}/${sample}/${samplename_1}.sortedbyname.bam \
+                ${OUTPUT_FOLDER}/${sample}/${samplename_2}.sortedbyname.bam \
+                --outBam ${OUTPUT_FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.bam \
+                --binSize 1000 \
+                --restrictionSequence GATC GA.TC \
+                --danglingSequence GATC A.T \
+                --restrictionCutFile ${REST_SITES_DIR}/Arima_site_positions_${genome}.sorted.bed \
+                --threads 12 \
+                --inputBufferSize 400000 \
+                -o ${OUTPUT_FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.h5 \
+                --QCfolder ${OUTPUT_FOLDER}/${sample}/${sample}.${genome}.HiC_1kb_QC \
+                2>>${OUTPUT_FOLDER}/${sample}/logs/buildmatrix.log
+
+    rm ${OUTPUT_FOLDER}/${sample}/${samplename_1}.sortedbyname.bam ${OUTPUT_FOLDER}/${sample}/${samplename_2}.sortedbyname.bam
+
+    samtools sort ${OUTPUT_FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.bam -o \
+    ${OUTPUT_FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.sorted.bam -@ 12 \
+    2>>${OUTPUT_FOLDER}/${sample}/logs/sortbam_matrix.log
+    
+    samtools index ${OUTPUT_FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.sorted.bam -@ 2 \
+    2>>${OUTPUT_FOLDER}/${sample}/logs/indexbam_matrix.log
+
+    bamCoverage -b ${OUTPUT_FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.sorted.bam -o \
+    ${OUTPUT_FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.sorted.bw -p 12 \
+    --normalizeUsing CPM 2>>${OUTPUT_FOLDER}/${sample}/logs/bamcoverage_matrix.log
+
+    hicCorrectMatrix diagnostic_plot -m ${OUTPUT_FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.h5 -o \
+    ${OUTPUT_FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.diagnosticplot.png \
+    2>>${OUTPUT_FOLDER}/${sample}/logs/diagnosticplot.log
+    "
+
+    if bjobs -w | grep -q "HiC_Alignment_sorting_${sample}"; then
+        wait_condition="-w done(HiC_Alignment_sorting_${sample})"
+    else
+        wait_condition=""
+    fi
+
+    # Submit the job
+    bsub -n $n -J "HiC_Matrix_${sample}" \
+        $wait_condition \
+        -o ${OUTPUT_FOLDER}/${sample}/${sample}_Matrix.log.out \
+        -e ${OUTPUT_FOLDER}/${sample}/${sample}_Matrix.log.err \
+        -M $M -R "select[mem>$M] rusage[mem=$M]" \
+        -q $q \
+        bash -c "${HiC_Matrix}"
+
+done < "$SAMPLE_SHEET"
+```
+
+---
+At this point the Diagnostic plot shold be evaluated and the matrix in .h5 format is converted to .hic or .cool for the visalization
+Idxstats to make some plot about the valid reads of the contact maps
+---
+
+```{bash, eval = F}
+#!/bin/bash
+SAMPLE_SHEET="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/galGal6_human_samples.csv"
+OUTPUT_FOLDER="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Processed_samples"
+CHROMSIZES_HG38_GALGAL6="/lustre/scratch126/gengen/projects/graft/Dataset/reference/hg38_galGal6_full_plusPuro/GRCh38.GRCg6a.full.renamed.merged.plusPuro.chromsizes.txt"
+CHROMSIZES_HG38_MM39="/lustre/scratch126/gengen/projects/graft/Dataset/reference/hg38_mm39/hg38_mm39_renamed_chromsizes.txt"
+M=128000
+q="normal"
+n=12
+
+module load HGI/softpack/groups/escramble/eSCRAMBLE/8
+
+while IFS=',' read -r sample fastq_1 fastq_2 genome;
+    do
+    
+    if [ "${genome}" == "hg38_galGal6" ]; then
+        CHROMSIZES=${CHROMSIZES_HG38_GALGAL6}
+    elif [ "${genome}" == "hg38_mm39" ]; then
+        CHROMSIZES=${CHROMSIZES_HG38_MM39}
+    else
+        echo "error: $genome not recognized"
+        exit 1
+    fi
+
+    echo "Sample is: ${sample}, genome is ${genome}"
+
+    Correct_convert="
+    samtools idxstats -@ 2 ${OUTPUT_FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.sorted.bam \
+    > ${OUTPUT_FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.stats
+
+    bash /lustre/scratch126/gengen/teams/parts/ab77/scripts/Convert_to_hic.sh \
+    ${OUTPUT_FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.h5 \
+    ${CHROMSIZES} \
+    h5
+    "
+
+    if bjobs -w | grep -q "HiC_Matrix_${sample}"; then
+        wait_condition="-w done("HiC_Matrix_${sample}")"
+    else
+        wait_condition=""
+    fi
+
+    # submit job only when the previous has finished
+    bsub -n $n -J "Correct_convert_${sample}" \
+        $wait_condition \
+        -o ${OUTPUT_FOLDER}/${sample}/${sample}.log.out \
+        -e ${OUTPUT_FOLDER}/${sample}/${sample}.log.err \
+        -M $M -R "select[mem>$M] rusage[mem=$M]" \
+        -q $q \
+        bash -c "${Correct_convert}"
+
+done < "$SAMPLE_SHEET"
+```
+
+---
+Some QC analysis about the coverage
+---
+
+```{r}
+data_path = "/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data"
+samplesheet = read_csv(file.path(data_path,"galGal6_human_samples.csv"), col_names = F)
+colnames(samplesheet) = c("Sample", "fq_1", "fq_2", "genome")
+```
+
+#idxstats files
+```{r}
+IDXSTATS = samplesheet %>% 
+  dplyr::mutate(Path_idxstats_1 = str_c(data_path,"/Processed_samples/chicken/",Sample,"/",str_replace(basename(fq_1), ".fastq.gz", ".stats")),
+                Path_idxstats_2 = str_c(data_path,"/Processed_samples/chicken/",Sample,"/",str_replace(basename(fq_2), ".fastq.gz", ".stats"))) %>% 
+  dplyr::mutate(idxstats_1 = map(Path_idxstats_1,
+                                 \(x) read_delim(
+                                   x, col_names = c("chr", "size_chr", "reads", "?")) %>% 
+                                   dplyr::filter(nchar(chr) < 8 & chr !="*" & str_detect(chr, "MT", negate =T)) %>% # Better delete the scaffolds and keep only the chromosomes
+                                   dplyr::mutate(Mate = "R1")), # to bind rows in the successive chunk and plot with grouping later
+                idxstats_2 = map(Path_idxstats_2,
+                                 \(x) read_delim(
+                                   x, col_names = c("chr", "size_chr", "reads", "?")) %>% 
+                                   dplyr::filter(nchar(chr) < 8 & chr !="*" & str_detect(chr, "MT", negate =T)) %>% 
+                                   dplyr::mutate(Mate = "R2"))
+                ) %>%
+  dplyr::select(!c(fq_1, fq_2, Path_idxstats_1, Path_idxstats_2))
+```
+
+# Barplot of total reads per sample
+```{r}
+IDXSTATS_Total_reads <- IDXSTATS %>% 
+  dplyr::mutate(Reads_1 = map_dbl(idxstats_1, \(x) sum(dplyr::pull(x, reads))),
+                Reads_2 = map_dbl(idxstats_2, \(x) sum(dplyr::pull(x, reads)))
+                ) %>% 
+  dplyr::select(Sample, Reads_1, Reads_2) %>% 
+  pivot_longer(cols = c(Reads_1, Reads_2), names_to = "Mate", values_to = "Reads") %>% 
+  separate_wider_delim(Sample, delim = ".", names = c("Samplename", "Rep"), cols_remove = F) %>% 
+  dplyr::mutate(
+    Cond = dplyr::case_when(
+      str_detect(Samplename, "5c3|1c2") ~ "Graft",
+      str_detect(Samplename, "DT40") ~ "DT40",
+      str_detect(Samplename, "SL29") ~ "SL29",
+      str_detect(Samplename, "HEK293T") ~ "HEK293T"
+    )
+  )
+
+IDXSTATS_Total_reads %>% 
+  ggplot(aes(x = Samplename, y = Reads, fill = Mate)) +
+  geom_col(position = "dodge") + 
+  scale_fill_manual(values = c("#b2d8d8", "#004c4c")) +
+  theme_bw() +
+  labs(
+    x = NULL,
+    fill = NULL
+  )
+
+ IDXSTATS_Total_reads %>% 
+  ggplot(aes(x = Cond, y = Reads, fill = Mate)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("#b2d8d8", "#004c4c")) +
+  theme_bw() +
+  labs(
+    x = NULL,
+    fill = NULL
+  )
+```
+
+# Barplot of reads chromsomic distribution
+```{r}
+IDXSTATS_X <- IDXSTATS %>% 
+  dplyr::mutate(Merged = map2(idxstats_1, idxstats_2, \(x, y) bind_rows(x, y)))
+
+Barplots_chromosomics_reads <- apply(IDXSTATS_X, MARGIN = 1, function(row) {
+    row[["Merged"]] %>% 
+    ggplot(aes(x = chr, y = reads, group = Mate, fill = Mate)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("#b2d8d8", "#004c4c")) +
+  labs(title = row[["Sample"]],
+       fill = NULL,
+       y = "Raw reads") +
+  theme_bw() +
+  coord_flip()
+}
+)
+
+names(Barplots_chromosomics_reads) <- IDXSTATS_X$Sample
+
+Barplots_chromosomics_reads
+```
+
+# Save
+```{r}
+for (i in names(Barplots_chromosomics_reads)) {
+  ggsave(Barplots_chromosomics_reads[[i]], filename=str_c("/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Plots/Coverage/",i,"_Coverage.png"), height = 8)
+}
+```
+
+# Barplot but with the reads normalized on the chromosome length and read coverage
+```{r}
+IDXSTATS_NORM <- IDXSTATS %>% 
+  dplyr::mutate(Total_mapped_reads_1 = map_dbl(idxstats_1, \(x) sum(x$reads)),
+                Total_mapped_reads_2 = map_dbl(idxstats_2, \(x) sum(x$reads))
+                ) %>% 
+  dplyr::mutate(idxstats_1 = map2(idxstats_1, Total_mapped_reads_1, \(x, y) dplyr::mutate(x, Reads_per_M_mapped = ((reads / size_chr) * 1000000000) / y)),
+                idxstats_2 = map2(idxstats_2, Total_mapped_reads_2, \(x, y) dplyr::mutate(x, Reads_per_M_mapped = ((reads / size_chr) * 1000000000) / y))
+                ) %>% 
+  dplyr::mutate(Merged = map2(idxstats_1, idxstats_2, \(x, y) bind_rows(x, y)))
+
+Barplots_chromosomics_reads_norm <- apply(IDXSTATS_NORM, MARGIN = 1, function(row) {
+    row[["Merged"]] %>% 
+    ggplot(aes(x = chr, y = Reads_per_M_mapped, group = Mate, fill = Mate)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("#b2d8d8", "#004c4c")) +
+  labs(title = row[["Sample"]],
+       fill = NULL,
+       y = "((Reads / chr length) * 1B) / Total reads") +
+  theme_bw() +
+  coord_flip()
+}
+)
+
+names(Barplots_chromosomics_reads_norm) <- IDXSTATS_NORM$Sample
+
+Barplots_chromosomics_reads_norm
+```
+
+# Save
+```{r}
+for (i in names(Barplots_chromosomics_reads_norm)) {
+  ggsave(Barplots_chromosomics_reads_norm[[i]], filename=str_c("/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Plots/Coverage_Norm/",i,"_Coverage.png"), height = 8)
+}
+```
+
+# Plot only chromsome 3
+```{r}
+IDXSTATS_NORM_unnest <- IDXSTATS_NORM %>% 
+  dplyr::select(Sample, Merged) %>% 
+  unnest(Merged) 
+
+Reads_norm_plot_gg6_1_hg38_3 <- IDXSTATS_NORM_unnest %>% 
+  dplyr::filter(chr %in% c("hg38_3", "gg6_1")) %>% 
+  ggplot(aes(x = Sample, y = Reads_per_M_mapped, group = Mate, fill = chr)) +
+  geom_col(position = "dodge", color = "black", width = 0.8) +
+  geom_text(aes(label = Mate), position = position_dodge(width = 0.7), vjust = -0.5, size = 2) +
+  theme_bw() +
+  labs(x = NULL,
+       y = "((Reads / chr length) * 1B) / Sample reads",
+       fill = NULL,
+       title = "Alignment reads") +
+  theme(axis.text.x=element_text(angle=45, hjust = 1))
+
+Reads_norm_plot_gg6_1_hg38_3
+```
+
+```{r}
+ggsave(Reads_norm_plot_gg6_1_hg38_3, filename="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Plots/Reads_norm_gg6_1_hg38_3.png", height = 7, width = 10)
+```
+
+
+############################
+#Idxstats of HiCExplorer bam
+############################
+
+```{r}
+IDXTSTATS_HiC <- samplesheet %>% 
+  dplyr::mutate(Mat_cov_file = str_c(data_path,"/Processed_samples/chicken/",Sample,"/",Sample,".",genome,".HiC_1kb.stats")) %>% 
+  dplyr::mutate(idxstats = map(Mat_cov_file, \(x) read_delim(x, 
+                                                             col_names = c("chr", "size_chr", "reads", "?")) %>% 
+                                                  dplyr::filter(nchar(chr) < 8 & chr !="*" & str_detect(chr, "MT", negate =T)))) %>% 
+  dplyr::mutate(Total_mapped_reads = map_dbl(idxstats, \(x) sum(x$reads))) %>% 
+  dplyr::select(!c(fq_1, fq_2, Mat_cov_file)) %>% 
+  dplyr::mutate(idxstats = map2(idxstats, Total_mapped_reads, \(x, y) dplyr::mutate(x, Reads_per_M_mapped = ((reads / size_chr) * 1000000000) / y)))
+
+IDXTSTATS_HiC_unnested <- IDXTSTATS_HiC %>% 
+  unnest(idxstats)
+
+HiC_Norm_chrlength_Totalreads_gg6_1_hg38_3 <- IDXTSTATS_HiC_unnested %>% 
+  dplyr::filter(chr %in% c("hg38_3", "gg6_1")) %>% 
+  ggplot(aes(x = Sample, y = Reads_per_M_mapped, fill = chr)) +
+  geom_col(position = "dodge", color = "black") +
+  theme_bw() +
+  labs(x = NULL,
+       y = "((reads / chr length) x 1B) / Sample reads",
+       fill = NULL,
+       title = "HiCExplorer matrix valid reads") +
+  theme(axis.text.x=element_text(angle=45, hjust = 1))
+
+HiC_Norm_chrlength_Totalreads_gg6_1_hg38_3
+```
+
+```{r}
+ggsave(HiC_Norm_chrlength_Totalreads_gg6_1_hg38_3, filename="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Plots/HiC_Norm_chrlength_Totalreads_gg6_1_hg38_3.png", height = 7, width = 10)
+```
+
+
+---
+The replicates looked consistent so the Matrices will be merged
+Created another samplesheet that recapitulates the Clones wuth the replicates as columns
+---
+
+```{bash, eval = F}
+#!/bin/bash
+SAMPLE_SHEET="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Samplesheet_chicken_matrix.csv"
+OUTPUT_FOLDER="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Merged_Matrix_chicken/"
+M=128000
+q="normal"
+n=1
+
+module load HGI/softpack/groups/escramble/eSCRAMBLE/8
+
+mkdir -p ${OUTPUT_FOLDER}
+
+while IFS=',' read -r sample Rep1 Rep2 Rep3 genome type 
+    do
+
+    mkdir -p ${OUTPUT_FOLDER}/${sample}
+
+    Sum_mat="
+    hicSumMatrices -m ${Rep1} ${Rep2} ${Rep3} -o ${OUTPUT_FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.h5
+    
+    hicCorrectMatrix diagnostic_plot -m ${FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.h5 -o \
+    ${FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.diagnosticplot.png \
+    --xMax 5000
+    "
+
+    bsub -n $n -J "Sum_matrix" \
+    -o ${OUTPUT_FOLDER}/${sample}/${sample}.Merge_mat.log.out \
+    -e ${OUTPUT_FOLDER}/${sample}/${sample}.Merge_mat.log.err \
+    -M $M -R "select[mem>$M] rusage[mem=$M]" \
+    -q $q \
+    bash -c "${Sum_mat}"
+
+done < ${SAMPLE_SHEET}
+```
+
+---
+Correction of the Matrics with ICE method
+Thresholds have been defined after looking at the diagnostic plots.
+The lower theshold is the most important. 
+Selecting only the chromosomes of interests reduce significantly the computation 
+time and probably the correction is better for the graft chromosome 
+since is correcting separatedly the aploid chicken chromosome
+
+If I had to rerun this I would probably NOT include hg38_Y, because it doesn't exists in HEK293T.
+This could avoid to amplify noise and make some weird stuff in downstream analysis
+---
+
+```{bash, eval = F}
+#!/bin/bash
+SAMPLE_SHEET="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Samplesheet_chicken_matrix.csv"
+FOLDER="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Merged_Matrix"
+CHROMSIZES_HG38_GALGAL6="/lustre/scratch126/gengen/projects/graft/Dataset/reference/hg38_galGal6_full_plusPuro/GRCh38.GRCg6a.full.renamed.merged.plusPuro.chromsizes.txt"
+M=256000
+q="long"
+n=12
+
+module load HGI/softpack/groups/escramble/eSCRAMBLE/8
+
+
+CHR_GRAFT=$(echo hg38_{1..22} hg38_X hg38_Y gg6_1)
+CHR_CHICKEN=$(echo gg6_{1..28} gg6_{30..33} gg6_W gg6_Z)
+CHR_HUMAN=$(echo hg38_{1..22} hg38_X hg38_Y)
+
+while IFS=',' read -r sample Rep1 Rep2 Rep3 genome type
+
+    do
+
+    if [ "${sample}" == "5c3" ]; then
+        CHR=${CHR_GRAFT}
+        LOW_LIM_1=-1.2
+        LOW_LIM_2=-1
+        MAX_LIM_1=3
+        MAX_LIM_2=5
+    elif [ "${sample}" == "1c2" ]; then
+        CHR=${CHR_GRAFT}
+        LOW_LIM_1=-1.4
+        LOW_LIM_2=-1
+        MAX_LIM_1=3
+        MAX_LIM_2=5
+    elif [ "${sample}" == "DT40" ]; then
+        CHR=${CHR_CHICKEN}
+        LOW_LIM_1=-1.6
+        LOW_LIM_2=-1
+        MAX_LIM_1=2
+        MAX_LIM_2=4
+    elif [ "${sample}" == "SL29" ]; then
+        CHR=${CHR_CHICKEN}
+        LOW_LIM_1=-1.8
+        LOW_LIM_2=-1
+        MAX_LIM_1=2
+        MAX_LIM_2=4
+    elif [ "${sample}" == "HEK293T" ]; then
+        CHR=${CHR_HUMAN}
+        LOW_LIM_1=-2
+        LOW_LIM_2=-1
+        MAX_LIM_1=2
+        MAX_LIM_2=5
+    else 
+        echo "not in the list of chromosomes"
+        exit 1
+    fi
+
+    PARAMS_LIST=(
+    "${LOW_LIM_1} ${MAX_LIM_1}"
+    "${LOW_LIM_1} ${MAX_LIM_2}"
+    "${LOW_LIM_2} ${MAX_LIM_1}"
+    "${LOW_LIM_2} ${MAX_LIM_2}"
+    )
+
+    # Correct ICE
+
+    for param in "${PARAMS_LIST[@]}";
+
+        do
+
+        name=$(echo ${param} | tr " " "_") 
+
+        correct_ICE="
+        hicCorrectMatrix correct -m ${FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.h5 \
+        -o ${FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.corrected.ICE_${name}.h5 \
+        --correctionMethod ICE \
+        --chromosomes ${CHR} \
+        --filterThreshold ${param}
+
+        bash /lustre/scratch126/gengen/teams/parts/ab77/scripts/Convert_to_hic.sh \
+        ${FOLDER}/${sample}/${sample}.${genome}.HiC_1kb.corrected.ICE_${name}.h5 \
+        ${CHROMSIZES_HG38_GALGAL6} \
+        h5
+        "
+
+        # echo ${correct_ICE}
+
+        bsub -J "correct_ICE_${sample}_${name}" \
+        -o ${FOLDER}/${sample}/${sample}.correct_Mat_ICE_${name}.log.out \
+        -e ${FOLDER}/${sample}/${sample}.correct_Mat_ICE_${name}.log.err \
+        -M $M -R "select[mem>$M] rusage[mem=$M]" \
+        -q $q \
+        bash -c "${correct_ICE}"
+
+    done
+
+done < ${SAMPLE_SHEET}
+```
+
+---
+Selected a threshold for each sample, the others are discarded.
+
+Thresholds are following:
+1c2: -1.4 3
+5c3: -1.2 3
+DT40: -1.6 2
+SL29: -1.8 2
+HEK293T: -2 5
+---
+
+---
+Merge the two Graft clones together and add the entry to the samplesheet
+---
+
+```{bash, eval = F}
+#!/bin/bash
+OUTPUT_FOLDER="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Merged_Matrix/5c3_1c2_merged"
+CHROMSIZES_HG38_GALGAL6="/lustre/scratch126/gengen/projects/graft/Dataset/reference/hg38_galGal6_full_plusPuro/GRCh38.GRCg6a.full.renamed.merged.plusPuro.chromsizes.txt"
+M=128000
+q="long"
+n=1
+
+module load HGI/softpack/groups/escramble/eSCRAMBLE/8
+
+mkdir -p ${OUTPUT_FOLDER}
+
+Command="
+    hicSumMatrices -m /lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Merged_Matrix/5c3/5c3.hg38_galGal6.HiC_1kb.corrected.ICE_-1.2_3.h5 \
+        /lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Merged_Matrix/1c2/1c2.hg38_galGal6.HiC_1kb.corrected.ICE_-1.4_3.h5 \
+        -o ${OUTPUT_FOLDER}/5c3_1c2.hg38_galGal6.HiC_1kb.corrected.ICE.h5
+
+    bash /lustre/scratch126/gengen/teams/parts/ab77/scripts/Convert_to_hic.sh \
+        ${OUTPUT_FOLDER}/5c3_1c2.hg38_galGal6.HiC_1kb.corrected.ICE.h5 \
+        ${CHROMSIZES_HG38_GALGAL6} \
+        h5
+    "
+
+bsub -n $n -J "Merge_graft_matrices" \
+    -o ${OUTPUT_FOLDER}/5c3_1c2_merge_correct.log.out \
+    -e ${OUTPUT_FOLDER}/5c3_1c2_merge_correct.log.err \
+    -M $M -R "select[mem>$M] rusage[mem=$M]" \
+    -q $q \
+    bash -c "${Command}"
+```
+
+---
+Extract the .cool at 500000 kb res from the .mcool
+Dump the cool to txt
+---
+
+```{bash, eval = F}
+#!/bin/bash
+SAMPLE_SHEET="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Samplesheet_chicken_matrix_plus_merged_Graft.csv"
+FOLDER="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Merged_Matrix_chicken"
+CHROMSIZES_HG38_GALGAL6="/lustre/scratch126/gengen/projects/graft/Dataset/reference/hg38_galGal6_full_plusPuro/GRCh38.GRCg6a.full.renamed.merged.plusPuro.chromsizes.txt"
+M=128000
+q="normal"
+n=1
+
+
+module load HGI/softpack/groups/escramble/eSCRAMBLE/8
+
+Res=500000
+
+while IFS=',' read -r  sample Rep1 Rep2 Rep3 genome
+    do
+
+    Cp_dump="
+    cooler cp ${FOLDER}/${sample}/${sample}.mcool::/resolutions/${Res} ${FOLDER}/${sample}/${sample}.${Res}.cool
+
+    cooler dump ${FOLDER}/${sample}/${sample}.${Res}.cool -o \
+    ${FOLDER}/${sample}/${sample}.${Res}.txt -t pixels --join --header
+    "
+
+    bsub -n $n -J "Extract_Dump_${sample}" \
+    -o ${FOLDER}/${sample}/logs/Extract_dump.log.out \
+    -e ${FOLDER}/${sample}/logs/Extract_dump.log.err \
+    -M $M -R "select[mem>$M] rusage[mem=$M]" \
+    -q $q \
+    bash -c "${Cp_dump}"
+```

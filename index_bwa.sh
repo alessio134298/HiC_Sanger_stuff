@@ -1,0 +1,1 @@
+bsub -o log.out -e log.err -M 32000 -q normal -n 12 -R "select[mem>32000] rusage[mem=32000]" bash -c "bwa index -p bwa_index/GRCh38.GRCg6a.full.renamed.merged.plusPuro.fa. /lustre/scratch126/gengen/projects/graft/Dataset/reference/hg38_galGal6_full_plusPuro/fasta/GRCh38.GRCg6a.full.renamed.merged.plusPuro.fa"

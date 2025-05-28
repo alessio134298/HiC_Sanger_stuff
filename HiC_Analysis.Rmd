@@ -1,0 +1,293 @@
+```{r setup}
+setwd("/lustre/scratch126/gengen/teams/parts/ab77/")
+library(tidyverse)
+library(rtracklayer)
+```
+
+```{r}
+path = "/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data"
+Samples_graft = read_csv(str_c(path,"/galGal6_human_samples.csv"), col_names = F) %>% 
+  dplyr::mutate(path_bw = str_c(path,"/Processed_samples/",X1,"/",X1,".",X4,".HiC_1kb.sorted.bw" ))
+```
+
+# Load BWs
+```{r}
+BigWig_graft <- sapply(Samples_graft$path_bw, function(x) rtracklayer::import(x, format ="bw"))
+names(BigWig_graft) = basename(names(BigWig_graft))
+```
+
+# Calculate the coverage of BigWig files over genomic windows
+```{r}
+# Define function
+galgal6.chr1.coverage.func <- function(Genomic_gr, Sample_Bw_gr, sample) {
+  
+  df <- as.data.frame(mergeByOverlaps(Genomic_gr, Sample_Bw_gr)) %>%
+    group_by(Genomic_gr.seqnames, Genomic_gr.start, Genomic_gr.end) %>%
+    summarise(Sum = sum(score, na.rm = F)) %>% 
+    ungroup() %>% 
+    dplyr::mutate(Sample = str_remove(sample, ".hg38_galGal6.HiC_1kb.sorted.bw"))
+    
+
+  colnames(df) <- c("seqnames", "start", "end", "signal", "Sample")
+  return(df)
+}
+
+# Compute mean signals
+
+# hg38_gg6 chromosome sizes (is the same using the .fai)
+hg38_galgal6.fai <- read.table("/lustre/scratch126/gengen/projects/graft/Dataset/reference/hg38_galGal6_full_plusPuro/fasta/GRCh38.GRCg6a.full.renamed.merged.plusPuro.fa.fai") %>% select(V1, V2)
+
+colnames(hg38_galgal6.fai) <- c("seqnames", "end")
+
+# keep only the right chr
+my.chr <- c(paste0("hg38_", c(1:22)), "hg38_X", "hg38_Y", paste0("gg6_", c(1:33)), "gg6_W", "gg6_Z")
+
+hg38_galgal6.fai <- hg38_galgal6.fai %>% filter(seqnames %in% my.chr) %>% mutate(start = 1) %>%
+  select(seqnames, start, end)
+
+# Convert to Granges and tiling
+hg38_galgal6_Gr <- makeGRangesFromDataFrame(hg38_galgal6.fai)
+hg38_galgal6_25kb_Gr <- unlist(tile(hg38_galgal6_Gr, width = 25000))
+
+# Apply function
+Bw_Graft_signals_over_windows <- list()
+
+for (name in names(BigWig_graft)) {
+  df <- galgal6.chr1.coverage.func(Genomic_gr = hg38_galgal6_25kb_Gr,
+                                   Sample_Bw_gr = BigWig_graft[[name]],
+                                   sample = name) %>% 
+    dplyr::mutate()
+  Bw_Graft_signals_over_windows[[name]] <- df
+}
+```
+
+# Boxplot
+```{r}
+library(ggpubr)
+
+# Enframe the list as a big dataframe
+Bw_Graft_signals_over_windows_Df <- Bw_Graft_signals_over_windows %>% 
+  enframe(value = "data") %>%
+  unnest(data)
+
+P <- Bw_Graft_signals_over_windows_Df %>% 
+  dplyr::filter(seqnames %in% c("hg38_3", "gg6_1")) %>% 
+  ggplot(aes(x = Sample, fill = seqnames, y = log1p ( signal ))) +
+  geom_boxplot(outliers = T) +
+  theme_bw() +
+  labs(x = NULL,
+       fill = "Chr",
+       y = "log1p (signal) (sum)")
+
+Bw_Graft_signals_over_windows_Df_Averaged <- Bw_Graft_signals_over_windows_Df %>% 
+  separate_wider_delim(cols = Sample, delim = ".", names = c("Sample", "Rep")) %>% 
+  group_by(Sample, seqnames, start, end) %>% 
+  summarise(signal = mean(signal)) %>% 
+  ungroup()
+
+
+P_avg <- Bw_Graft_signals_over_windows_Df_Averaged %>% 
+  dplyr::filter(seqnames %in% c("hg38_3", "gg6_1")) %>% 
+  ggplot(aes(x = Sample, fill = seqnames, y = log1p ( signal ))) + # idk why but adding group = Sample if faceting and applying stats
+  geom_point(position = position_jitterdodge(jitter.width = 3), shape = 1, size = 1, color = "darkgrey") +
+  geom_boxplot(outliers = F) +
+  # facet_wrap(~ seqnames, scales = "free") +
+  # stat_compare_means(method = "wilcox.test",
+  #                    group.by = "seqnames",
+  #                    comparisons = list(c("1c2", "5c3"),
+  #                                       c("1c2", "DT40"),
+  #                                       c("1c2", "SL29"),
+  #                                       c("5c3", "DT40"),
+  #                                       c("5c3", "SL29")
+  #                                       )
+  # ) +
+  theme_bw() +
+  labs(x = NULL,
+       fill = "Chr",
+       y = "log1p (signal) (sum)")
+```
+
+```{r}
+ggsave(P_avg, filename="/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Plots/Signal_bwHiCExplorer_gg6_1_hg38_3.png", height = 5, width = 8)
+```
+
+
+############################
+# Inter chromosomal contacts
+############################
+```{r}
+# .cool converted to txt with cooler dump as input
+
+#Filtered with the script Keep_only_interchr.R
+# Res 500000
+
+Path = "/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Merged_Matrix_chicken/"
+Samples = list.files(Path)
+Files = paste0(Path,Samples,"/",Samples,".500000.onlyinterchr.txt") # Exclude the Single Graft
+```
+
+# Function to calculate the interchromosomal contacts and normalize (https://pmc.ncbi.nlm.nih.gov/articles/instance/3320767/bin/NIHMS357930-supplement-01.pdf)
+```{r}
+# formula = 
+# (N contacts chr1 - chr2) / 
+#   ((chr1 trans / total trans) * (chr2 trans / (total trans - chr1 trans)) + 
+#    (chr2 trans / total trans) * (chr1 trans / (total trans - chr2 trans)) * 
+#      (Total trans / 2))
+
+Calculate_Interchromosomal_contacts <- function(df, df_trans, Chromosomes) {
+  
+  # Total reads of chrom1 with all the other chrom
+  chrom1_tab <- df %>% 
+    group_by(chrom1) %>% 
+    dplyr::summarize(total_chrom1 = sum(count, na.rm = T))
+  
+  # Total reads of chrom2 with all the other chrom
+  chrom2_tab <- df %>% 
+    group_by(chrom2) %>% 
+    dplyr::summarize(total_chrom2 = sum(count, na.rm = T)) 
+  
+  # Sum of the reads of the two columns
+  # All this stuff is done because the original dumped file is not simmetric
+  chr_trans <- full_join(chrom1_tab, chrom2_tab, join_by("chrom1" == "chrom2")) %>% 
+    dplyr::mutate(total_chrom1 = ifelse(!is.na(total_chrom1), total_chrom1, 0 ),
+                  total_chrom2 = ifelse(!is.na(total_chrom2), total_chrom2, 0 )
+                  ) %>% 
+    dplyr::mutate(interchr_interactions = total_chrom1 + total_chrom2) %>% 
+    dplyr::select(chrom1, interchr_interactions) %>% 
+    dplyr::rename("chrom" = "chrom1")
+  
+  # Calculate interactions
+  Frequency_Tab_interchrom <- df %>% 
+    group_by(chrom1, chrom2) %>% # I think this works
+    summarize(Raw_Interactions = sum(count, na.rm = T)) %>% 
+    ungroup() %>% 
+    # Must do the join two times (Yes, the data will be redundant,
+    # but to apply the formula it needs to be both present on the same row)
+    left_join(chr_trans, join_by("chrom1" == "chrom")) %>%
+    dplyr::rename("chrom1_trans_interactions" = "interchr_interactions") %>%
+    left_join(chr_trans, join_by("chrom2" == "chrom")) %>% 
+    dplyr::rename("chrom2_trans_interactions" = "interchr_interactions") %>% 
+    # Apply formula
+    dplyr::mutate(Interactions = 
+                  Raw_Interactions / 
+    (((chrom1_trans_interactions / df_trans) * (chrom2_trans_interactions / (df_trans - chrom1_trans_interactions)) + 
+      (chrom2_trans_interactions / df_trans) * (chrom1_trans_interactions / (df_trans - chrom2_trans_interactions))) * 
+        (df_trans / 2))
+                    )
+  
+  Frequency_Tab_interchrom$chrom1 <- factor(Frequency_Tab_interchrom$chrom1, levels = Chromosomes)
+  Frequency_Tab_interchrom$chrom2 <- factor(Frequency_Tab_interchrom$chrom2, levels = Chromosomes)
+  
+  return(Frequency_Tab_interchrom)
+}
+```
+
+```{r}
+Interchr_contacts_list <- list()
+
+for (sample in Files) {
+
+  Sample_interchr <- read_delim(sample)
+  
+  # Chromosomes of the samples
+  Chromosomes <- unique(c(Sample_interchr$chrom1, Sample_interchr$chrom2))
+  
+  # Define the number fo total interchromosomal interactions in the dataset
+  Total_trans = sum(Sample_interchr$count, na.rm = T)
+  
+  name = basename(sample)
+  # Apply function
+  Interchr_contacts_list[[name]] <- Calculate_Interchromosomal_contacts(Sample_interchr, Total_trans, Chromosomes)
+
+}
+```
+
+# Save the Results
+```{r}
+for (i in names(Interchr_contacts_list)) {
+  write_csv(Interchr_contacts_list[[i]], file = paste0("/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Chicken_graft_Tables/",i,".csv") %>% str_remove(".txt"))
+}
+```
+
+# Plot
+```{r}
+for (i in names(Interchr_contacts_list)) {
+  
+  sample = str_replace(i, ".500000.onlyinterchr.txt", "")
+  
+  P <- Interchr_contacts_list[[i]] %>% 
+    dplyr::arrange(chrom1) %>% 
+    ggplot(aes(x = chrom1, y = chrom2, fill = Interactions)) +
+    geom_tile(colour = "white") +
+    scale_x_discrete(drop = FALSE) + scale_y_discrete(drop = FALSE) +
+    scale_fill_gradientn(
+    colours = c("white", "lightblue", "blue", "darkblue"),
+    trans = scales::pseudo_log_trans(sigma = 0.01)
+    ) +
+    theme(axis.text.x = element_text(angle = 90)) +
+    labs(
+      fill = "Interaction Score",
+      title = sample,
+      subtitle = "Res: 500000",
+      x = NULL,
+      y = NULL
+    )
+  
+  plot(P)
+  ggsave(P, file = paste0("/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Plots/Interchr_Heatmap/",sample,".png"))
+}
+```
+# Let s see the differences for a sample with the different cooler balancing
+# Maybe the --transonly is better?
+```{r}
+path = "/lustre/scratch126/gengen/projects/graft/Analysis/ab77/hic_analysis/new_data/Processed_samples/chicken/5c3.rep1/cooler/"
+Samples = c("5c3.rep1.hg38_galGal6.500000.balanced.onlyinterchr.txt",
+            "5c3.rep1.hg38_galGal6.500000.balanced_intra.onlyinterchr.txt",
+            "5c3.rep1.hg38_galGal6.500000.balanced_inter.onlyinterchr.txt")
+
+`5c3.rep1` = file.path(path,Samples)
+```
+
+```{r}
+`5c3.rep1_Interchr_contacts_list` <- list()
+
+for (sample in `5c3.rep1`) {
+
+  Sample_interchr = read_delim(sample) %>% 
+    dplyr::select(-count) %>% # If the file has been balanced with cooler it has 1 more column called "balanced", and we use this as the counts
+    dplyr::rename(count = balanced)
+
+  # Chromosomes of the samples
+  Chromosomes <- unique(c(Sample_interchr$chrom1, Sample_interchr$chrom2))
+  
+  # Define the number fo total interchromosomal interactions in the dataset
+  Total_trans = sum(Sample_interchr$count,  na.rm = T)
+  
+  name = basename(sample)
+  # Apply function
+  `5c3.rep1_Interchr_contacts_list`[[name]] <- Calculate_Interchromosomal_contacts(Sample_interchr, Total_trans, Chromosomes)
+}
+```
+```{r}
+for (i in names(`5c3.rep1_Interchr_contacts_list`)) {
+
+  P <- `5c3.rep1_Interchr_contacts_list`[[i]] %>% 
+    dplyr::arrange(chrom1) %>% 
+    ggplot(aes(x = chrom1, y = chrom2, fill = Interactions)) +
+    geom_tile(colour = "white") +
+    scale_x_discrete(drop = FALSE) + scale_y_discrete(drop = FALSE) +
+    scale_fill_gradientn(
+    colours = c("white", "pink", "red", "darkred"),
+    trans = scales::pseudo_log_trans(sigma = 0.01)
+    )+
+    labs(
+      title = i,
+      subtitle = "Res: 500000",
+      x = NULL,
+      y = NULL
+    )
+  
+  plot(P)
+    
+}
+```

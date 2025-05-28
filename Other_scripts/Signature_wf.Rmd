@@ -1,0 +1,178 @@
+```{r setup}
+library(tidyverse)
+knitr::opts_knit$set(root.dir = "/lustre/scratch126/gengen/teams/parts/ab77/")
+getwd()
+```
+
+# Try Signature Community detection
+```{bash}
+cooler cp "5c3.hg38_galGal6.HiC_1kb.corrected.ICE.mcool//Resolutions/1000000" \ "5c3.hg38_galGal6.HiC_1kb.corrected.ICE.100000.cool"
+
+cooler balance "5c3.hg38_galGal6.HiC_1kb.corrected.ICE.100000.cool" \
+"5c3.hg38_galGal6.HiC_1kb.corrected.ICE.1000000_bal.cool" \
+--force
+
+cooler dump "5c3.hg38_galGal6.HiC_1kb.corrected.ICE.1000000_bal.cool" \
+-t pixels --join --header -o "5c3.hg38_galGal6.HiC_1kb.corrected.ICE.1000000_bal.txt"
+```
+
+# load file and sort as the final 3 column file
+```{r}
+options(scipen=999)
+
+#######################################################
+# test on my data
+
+# input is a cooler dumped file
+file = "SIGNATURE/Pipeline/Community_Detection/5c3.hg38_galGal6.HiC_1kb.corrected.ICE.1000000_bal.txt"
+
+Graft <- read_delim(file, col_names = T)
+
+colnames(Graft) <- c("chrA", "stA", "endA","chrB", "stB", "endB", "rawread", "freq")
+
+Graft <- Graft[!is.na(Graft$freq),]
+Graft <- Graft[,c("chrA", "stA", "chrB", "stB", "freq")]
+
+Graft <- Graft[!(Graft$chrA == "hg38_M" | Graft$chrB == "hg38_M"), ]
+
+Graft$chrA <- sub("chr", "", as.character(Graft$chrA))
+Graft$chrB <- sub("chr", "", as.character(Graft$chrB))
+
+Graft$ID_chrA <- paste(Graft$chrA, Graft$stA, sep = "_")
+Graft$ID_chrB <- paste(Graft$chrB, Graft$stB, sep = "_")
+
+Graft$freq <- as.numeric(Graft$freq)
+
+Graft <- Graft[,c("ID_chrA", "ID_chrB", "freq")]
+
+# Since i skip the average passage of Signature pipeline (don t need to merge samples i call this column average to mathc with the xpected input of CD_pycombo.py)
+
+colnames(Graft) <- c("ID_chrA", "ID_chrB", "average")
+
+Graft <- Graft %>% 
+  relocate(average, .after = ID_chrB)
+
+write_delim(Graft, file = "SIGNATURE/Pipeline/Community_Detection/5c3.hg38_galGal6.HiC_1kb.corrected.ICE.1000000_bal_processed.txt", delim = "\t", col_names = T)
+```
+# Run pycombo
+```{python}
+# -*- coding: utf-8 -*-
+"""
+"""
+import networkx as nx
+import pandas as pd
+import pycombo
+
+### set the directory where your data is located
+# data_folder = '../Demo'
+
+
+input_file = "/lustre/scratch126/gengen/teams/parts/ab77/SIGNATURE/Pipeline/Community_Detection/5c3.hg38_galGal6.HiC_1kb.corrected.ICE.1000000_bal_processed.txt"
+output_file = "/lustre/scratch126/gengen/teams/parts/ab77/SIGNATURE/Pipeline/Community_Detection/5c3.hg38_galGal6.HiC_1kb.corrected.ICE.1000000_communities.txt"
+### load the dataset
+
+data = pd.read_csv(
+    input_file,
+    usecols=['ID_chrA', 'ID_chrB', 'average'],
+    delimiter='\t'
+)
+
+print(data.head)
+
+    #if __name__ == "__main__":
+
+min_weight = data['average'].min()
+data['average'] = data['average'] + abs(min_weight)
+
+graph = nx.from_pandas_edgelist(data, source='ID_chrA', target='ID_chrB', edge_attr='average')
+
+print(nx.number_of_nodes(graph))
+print(nx.number_of_edges(graph))
+    # Solve
+communities = pycombo.execute(graph, 'average', modularity_resolution=1.2, max_communities=46)
+
+comms = {}
+for node, c in communities[0].items():
+    if c not in comms:
+            comms[c] = [node]
+    else:
+            
+            comms[c].append(node)
+print(len(comms))
+    
+##### each node in a row
+with open(output_file, 'w') as file:
+    # create a list to store the rows of the dataframe
+    rows = []
+    # initialize the community ID counter to 1
+    com_id = 1
+    # iterate over each element in the list
+    for com, nodes in comms.items():
+    # iterate over each node in the community
+        for node in nodes:
+            # append a row to the list with the node ID and community ID
+            rows.append([node, com_id])
+        # increment the community ID counter for the next community
+        com_id += 1
+    # create a dataframe from the rows list
+    df = pd.DataFrame(rows, columns=['ID name', 'Community ID'])
+    # write the dataframe to the file as a CSV
+    df.to_csv(file, index=False)
+```
+
+#  construct EgdeList
+```{r}
+chr_list <- c(paste0("hg38_", c(1:22)), "gg6_1")
+
+comms <- read.table("SIGNATURE/Pipeline/Community_Detection/5c3.hg38_galGal6.HiC_1kb.corrected.ICE.1000000_communities.txt", sep = ",", header = T)
+
+comms <- comms %>% separate_wider_delim(ID.name, 
+                                        delim = "_",
+                                        too_many = "merge",
+                                        names = c("chr", "number", "st"), cols_remove = F) %>%
+  dplyr::mutate(chr = paste0(chr,"_",number)) %>% 
+  dplyr::filter(chr %in% chr_list) %>% 
+  dplyr::select(!number)
+
+#comms$chr <- as.numeric(comms$chr)
+comms$st <- as.numeric(comms$st)
+
+sorted_comms <- comms[order(comms$chr, comms$st),]
+
+edge_list_final <- data.frame()
+for(i in 1:length(chr_list)){
+  chr_name <- chr_list[i]
+  data_chr <- sorted_comms[which(sorted_comms$chr == chr_name),]
+ if(nrow(data_chr) > 1){
+  edge_list <- matrix(NA, ncol = 2, nrow = nrow(data_chr)-1)
+  for(j in 1:(nrow(data_chr)-1)){
+  edge_list[j,1] <- data_chr$ID.name[j]
+  edge_list[j,2] <- data_chr$ID.name[j+1]
+  }
+  edge_list_final <- rbind(edge_list_final, edge_list)
+  }
+}
+
+colnames(edge_list_final) <- c("Source", "Target")
+
+# edge_list_final <- edge_list_final %>% separate_wider_delim(Target, 
+#                                         delim = "_",
+#                                         too_many = "merge",
+#                                         names = c("chr", "number", "st"), cols_remove = F) %>% 
+#   dplyr::mutate(Target = paste0(chr,"_",number)) %>% 
+#   dplyr::select(!number)
+#   
+# edge_list_final <- edge_list_final[,-4]
+
+write.table(edge_list_final, "SIGNATURE/Pipeline/Community_Detection/5c3.hg38_galGal6.HiC_1kb.corrected.ICE.1000000.edgelist.txt", sep = ",", row.names = F)
+```
+
+# convert to csv
+```{r}
+read.table("SIGNATURE/Pipeline/Community_Detection/5c3.hg38_galGal6.HiC_1kb.corrected.ICE.1000000_communities.txt", sep = ",", header = T) %>% 
+    write.table(., "SIGNATURE/Pipeline/Community_Detection/5c3.hg38_galGal6.HiC_1kb.corrected.ICE.1000000_communities.csv", sep = ",", row.names = F)
+```
+
+# change the column Id to match with Gephi expected names
+```{bash}
+sed 
